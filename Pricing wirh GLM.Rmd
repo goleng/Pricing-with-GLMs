@@ -1,0 +1,1344 @@
+---
+title: 'Advanced Non-Life Insurance Mathematics Assignment 2: Pricing'
+author: Pieter Pijls^[r0387948 (Faculty of Economics and Business, KU Leuven, Leuven,
+  Belgium)]
+  Pieter-Jan Dubois^[r0382187 (Faculty of Economics and Business, KU Leuven, Leuven,
+  Belgium)]
+  Eva Thienpondt^[r0639885 (Faculty of Economics and Business, KU Leuven, Leuven,
+  Belgium)]
+date: "Academic year 2017-2018"
+output:
+  pdf_document:
+    df_print: paged
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 12
+    includes:
+      in_header: preamble-latex.tex
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.pos = 'H',warning = FALSE,message = FALSE,cache = TRUE)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,  include=FALSE }
+# Block 0) Setup ----
+
+setwd("/users/Pieter-Jan/R/Advanced non life mathematics")
+
+
+packages <- c("data.table","mgcv", "evtree", "classInt", "magrittr", "rgdal", "ggplot2", "ggmap","grid","gridExtra","xtable","sas7bdat","plyr","knitr","kableExtra","xtable")
+suppressMessages(packages <- lapply(packages, FUN = function(x) {
+  if (!require(x, character.only = TRUE)) {
+    install.packages(x)
+    library(x, character.only = TRUE)
+  }
+}))
+```
+
+# Introduction
+
+In this assignment we analyze a real-life pricing data set (third party liability insurance portfolio) on claim frequencies and sevirities. We include different risk factors (factor,continuous,spatial,interaction) in our models. First, we perform a data exploration. Second, we develop a model for the frequency using GAMs and GLMs. Finally, we construct a severity model. 
+
+# Block 1) Load and inspect the data
+
+## Question 1
+```{r,  include=FALSE }
+# Q1: load the data: use 'read.table(..)' and get data from BB site
+##DT <- read.table(file="/Users/pieterpijls/Documents/KU LEUVEN/MFAE/ADVANCED NON LIFE/Assignment 2/P&Cdata.txt", header=TRUE,sep="")
+DT <- read.table(file="/users/Pieter-Jan/R/Advanced non life mathematics/P&Cdata.txt", header=TRUE,sep="")
+```
+
+In this section we reproduce the severity data from Henckaerts et al (2017) by calculating the average cost of claim equal to the ratio of total claim amount and the number of claims. Next, we exclude observations with no claims. In addition, we remove observations with an average cost of claim higher than EUR 81.000 using Extreme Value Theory (EVT). The R code we used is as follow. 
+
+```{r}
+# Henckaerts et al (2017), page 11: specification of the severity data
+DT.sev <- as.data.frame(cbind(DT$AMOUNT/DT$NCLAIMS,DT$AMOUNT))
+# Exclude NA
+DT.sev <- as.data.frame(DT.sev[complete.cases(DT.sev[,1]),])
+# Exclude large claims
+DT.sev <- as.data.frame(DT.sev[!(DT.sev$V1>81000),])
+colnames(DT.sev) <- c("Severity","AMOUNT")
+```
+
+## Question 2
+
+In this section we explore a third party liability (MTPL) insurance portfolio from a Belgian insurer in 1997. In total, the data set contains 163 231 policyholders. Figure 1 illustrates the distribution of the number of claims (`nclaims`), fraction of year the policyholders was exposed(exp) and the total amount claimed by the policyholder in euro (`amount`). 
+
+```{r, echo=FALSE}
+stat1 <- sum(DT$NCLAIMS)/sum(DT$EXP) # overall claim frequency
+stat2 <- sum(DT$AMOUNT)/sum(DT$NCLAIMS) # average claim amount
+stat3 <- length((DT$AMOUNT[DT$AMOUNT>10000]))/length(DT$AMOUNT[DT$AMOUNT>0]) # fraction with claims higher as 10000
+
+summary <- matrix(c(stat1, stat2, stat3),ncol =3)
+
+colnames(summary) <- c("Overall claim frequency","Average claim amount", "Fraction of claims higher as 10000")
+kable(summary,caption = "Basic statistics", align='c',format="latex", booktabs = TRUE) %>%
+          kable_styling(latex_options = c("striped","hold_position"))
+```
+
+In figure 1 the vertical red dotted line is equal to the mean of the respective variable. Around 90% of the policyholders are claim-free, while around 10% files one claim. On average a policyholders files in 0.12 claims per year. Around 1% of the policyholders files more than one claim. Around 77% of the policyholders have an exposure equal to one. The average exposure is 0.89 year. We calculated the claim frequency as the ratio of the total number claims and the total exposure in years. Most claims involve only small amounts, where around 2% of the claims exceed 10.000 EUR. In addition, we calculated the overall claim frequency, equal to 13.93%, as the ratio of the total number of claims and the total exposure in years. 
+
+```{r,  include=FALSE}
+# Visualization parameters and functions
+col <-  c("hotpink4", "steelblue")
+fill <- c("hotpink", "steelblue1")
+ylab <- "Relative frequency"
+```
+
+```{r, include=FALSE}
+# This function creates the histograms from the paper
+ggplot.hist <- function(DT,variable,xlab,binwidth,probs){
+  ggplot(data=DT, aes(variable, fill = cut(variable, quantile(variable,probs=probs))), environment=environment()) + theme_bw() + 
+    geom_histogram(aes(y = (..count..)/sum(..count..)),binwidth=binwidth) + 
+    labs(x=xlab,y=ylab) + geom_vline(aes(xintercept=mean(variable, na.rm=T)),   # Ignore NA values for mean
+color="red", linetype="dashed", size=1) + guides(fill=FALSE)
+}
+```
+
+```{r, include=FALSE}
+ggplot(DT, aes(POWER, fill = cut(POWER, quantile(DT$POWER,probs=c(0,0.2,0.4,0.6,0.8,1))))) + theme_bw() +
+    geom_histogram(bins=50,show.legend = FALSE) + geom_vline(aes(xintercept=mean(POWER, na.rm=T)),   # Ignore NA values for mean
+color="red", linetype="dashed", size=1)
+```
+
+```{r, include=FALSE}
+plot.eda.amount <- ggplot(data=DT.sev, aes(DT.sev$AMOUNT)) + geom_density(adjust=3,col="steelblue",fill="steelblue1") + xlim(0,1e4) + ylab("Density") + xlab("amount")  + theme_bw()
+```
+
+```{r, include=FALSE}
+plot.eda.power <- ggplot.hist(DT,DT$POWER,"power",10,c(0,0.2,0.4,0.6,0.8,1))
+plot.eda.power
+# plot.eda.ageph <- ggplot.hist(DT,DT$AGEPH,"ageph",2) # in population pyramid
+plot.eda.agec <- ggplot.hist(DT,DT$AGEC,"agec",1,c(0,0.2,0.4,0.6,0.8,1))
+plot.eda.agec
+#plot.eda.bm <- ggplot.bar(DT,DT$BM,"bm",,c(0,0.2,0.4,0.6,0.8,1))
+plot.eda.exp <- ggplot.hist(DT,DT$EXP,"exp",0.05,c(0,1))
+plot.eda.exp
+plot.eda.bm <- ggplot.hist(DT,DT$BM,"bm",1,c(0,1))
+plot.eda.bm
+plot.eda.nclaims <- ggplot.hist(DT,DT$NCLAIMS,"nclaims",1,c(0,1))
+plot.eda.nclaims
+```
+
+```{r, include=FALSE}
+## BAR functions
+# This function creates the barplots from the paper
+ggplot.bar <- function(DT,variable,xlab,fill1,col1){
+  ggplot(data=DT, aes(as.factor(variable)), environment=environment()) + theme_bw() + 
+    geom_bar(aes(y = (..count..)/sum(..count..)),col=col1,fill=fill1) + labs(x=xlab,y=ylab)
+}
+```
+
+```{r, include=FALSE}
+#Bar plot of factor variables
+plot.eda.coverage <- ggplot.bar(DT,DT$COVERAGE,"coverage",c(fill,"springgreen"),c(col,"springgreen4"))
+plot.eda.coverage
+plot.eda.fuel <- ggplot.bar(DT,DT$FUEL,"fuel",fill,col)
+#plot.eda.sex <- ggplot.bar(DT,DT$SEX,"sex") # alreadey in popuaton
+plot.eda.use <- ggplot.bar(DT,DT$USE,"use",fill,col)
+plot.eda.fleet <- ggplot.bar(DT,DT$FLEET,"fleet",fill,col)
+```
+
+```{r , echo=FALSE, fig.cap="Relative frequency of the risk factors of nclaims and exp and density estiamte amount"}
+grid.arrange(plot.eda.nclaims,plot.eda.exp,plot.eda.amount,ncol=3)
+```
+
+Next, we create a population pyramid of the policyholders in our data set. Figure 2 illustrates that most policyholders are men (blue). For every female (pink) policyholder there exist around two male policyholders. The population pyramid shows that most policyholders are between 30 and 70 years old. We only observe a few young and old drivers in the population pyramid. 
+
+```{r , echo=FALSE, fig.cap="Population Pyramid"}
+test <- as.data.frame(cbind(DT$SEX, DT$AGEPH))
+colnames(test) <- c("g","v")
+test$g <- as.factor(test$g )
+test$g <- as.character(test$g)
+test$g[test$g=="2"] <- "Male"
+test$g[test$g=="1"] <- "Female"
+test$g <- as.factor(test$g)
+
+g <- ggplot(data=test,aes(x=as.factor(v),fill=g)) + theme_bw() +
+  geom_bar(data=subset(test,g=="Male")) + 
+  geom_bar(data=subset(test,g=="Female"), aes(y=..count..*(-1))) + coord_flip() + scale_y_continuous(labels = abs, limits = 3200 * c(-1,1)) + 
+  labs(y = "Population") + labs(x = "Age") + labs(fill="Sex") +  scale_x_discrete(breaks=seq(18,100,5),labels=abs(seq(18,100,5))) + scale_fill_manual(values = c("hotpink", "steelblue1"))
+g
+```
+
+Figure 3 illustrates how the four categorical risk factors: `coverage`, `fuel`, `use` and `fleet` are distributed. Around 60% of the policyholders only have a TPL coverage, while around 28% has a partial omnium and around 13% has a full omnium. Most policyholders' type of fuel is gasoline (69.12%), while diesel accounts for 30.88%. Most policyholders use their car mainly for private reasons (95%) and most cars are not part of a fleet (97%). 
+
+```{r , echo=FALSE, fig.cap="Relative frequency of coverage, fuel, sex, use and fleet"}
+grid.arrange(plot.eda.coverage,plot.eda.fuel,plot.eda.use,plot.eda.fleet,ncol=2) # factors
+```
+
+Figure 4 illustrates the distribution of three continuous risk factors: `power`, `agec` and `bm`. The histograms of the variables power and agec are split into five groups using the quantiles 0%, 20%, 40%, 60%, 80% and 100%. The vertical red dashed line is equal to the variable mean. The average horsepower of a car is around 55 kilowatt. Almost all insured cars (97.35%) have less than 100 kilowatt of horsepower. The average age of the vehicles is 7.37 years and the average bonus-malus level is 3.3. Most policyholders have a bonus-malus level of 0 (37.77%) or 1 (16.52). Only a small fraction of the policyholders (2.81%) has a higher bonus-malus level than 11.   
+
+```{r , echo=FALSE, fig.cap="Relative frequency of power, agec and bm"}
+grid.arrange(plot.eda.power,plot.eda.agec,plot.eda.bm,ncol=3) # discrete
+```
+
+```{r, include=FALSE}
+# Two dimensional density for interaction effects
+# See http://ggplot2.tidyverse.org/reference/geom_density_2d.html
+
+plot.eda.agephpower <- ggplot(DT,aes(x=AGEPH,y=POWER)) + stat_density2d(aes(fill = ..level..),geom="polygon") 
+plot.eda.agephpower <- plot.eda.agephpower + scale_fill_gradient("Density",low="springgreen",high="tomato") 
+plot.eda.agephpower <- plot.eda.agephpower + theme_bw() + xlab("ageph") + ylab("power")
+plot.eda.agephpower
+```
+
+```{r, include=FALSE}
+DT_PC <- aggregate(EXP ~ PC, data=DT, length)
+DT_PC$N <- DT_PC$EXP
+```
+
+```{r, include=FALSE}
+##setwd("/Users/pieterpijls/Documents/KU LEUVEN/MFAE/ADVANCED NON LIFE/Assignment 2/")
+
+# Get the shape file of Belgium
+readShapefile = function(){
+  belgium_shape <- readOGR(dsn = path.expand(paste(getwd(),"/Shape file Belgie postcodes",sep="")), 
+    layer = "npc96_region_Project1")
+  belgium_shape <- spTransform(belgium_shape, CRS("+proj=longlat +datum=WGS84"))
+  belgium_shape$id <- row.names(belgium_shape)
+  return(belgium_shape)
+}
+belgium_shape = readShapefile()
+str(belgium_shape@data)
+belgium_shape@data <- merge(belgium_shape@data, DT_PC, by.x = "POSTCODE", by.y = "PC", all.x = TRUE)
+belgium_shape@data$freq <- belgium_shape@data$N/sum(belgium_shape@data$N, na.rm = TRUE)/belgium_shape@data$Shape_Area
+belgium_shape@data$freq_class <- cut(belgium_shape@data$freq, breaks = quantile(belgium_shape@data$freq,c(0,0.2,0.8,1),na.rm=TRUE), right = FALSE,include.lowest = TRUE, labels = c("low","average","high")) 
+belgium_shape_f <- fortify(belgium_shape)
+belgium_shape_f <- merge(belgium_shape_f, belgium_shape@data, all.x = TRUE)
+```
+
+```{r, include=FALSE}
+plot.eda.map <- ggplot(belgium_shape_f, aes(long,lat, group = group)) + geom_polygon(aes(fill = belgium_shape_f$freq_class),colour="black",size=0.1)
+plot.eda.map <- plot.eda.map + theme_nothing(legend = TRUE) + labs(fill = "Relative\nfrequency") + scale_fill_brewer(palette=c("springgreen","orange","tomato"), na.value = "white")
+#plot.eda.map
+```
+
+The left panel of Figure 5 illustrates the two-dimensional estimate for ageph and power. The right panel shows the map of Belgium. The exposure of each municipality relative to the area of the municipality is grouped into three sets: low, average and high **(for more details see Q4)**. 
+
+```{r , echo=FALSE, fig.cap="Density estimate of ageph-power (left) and map of Belgium wth exposures (right)"}
+# Putting these together
+grid.arrange(plot.eda.agephpower,plot.eda.map,ncol=2)
+```
+
+## Question 3
+
+In this section we reproduce the figures from Henckaerts et al (2017). See R code for further details. 
+
+```{r,  include=FALSE}
+# Visualization parameters and functions
+col <- "#003366"
+fill <- "#99CCFF"
+ylab <- "Relative frequency"
+```
+
+```{r, include=FALSE}
+g <- ggplot(data=DT, aes(NCLAIMS))+theme_bw()
+g + geom_bar(col=col,fill=fill)
+```
+
+```{r, include=FALSE}
+g <- ggplot(data=DT, aes(NCLAIMS))+theme_bw()
+g + geom_bar(aes(weight = EXP),col=col,fill=fill)
+```
+
+```{r, include=FALSE}
+g <- ggplot(data=DT, aes(NCLAIMS))+theme_bw()
+g + geom_bar(aes(y = (..count..)/sum(..count..)),col=col,fill=fill) + labs(y="Relative frequency")
+```
+
+```{r, include=FALSE}
+g <- ggplot(data=DT,aes(AGEPH))+theme_bw()
+g + geom_histogram(binwidth=2,col=col,fill=fill)
+```
+
+```{r, include=FALSE}
+g <- ggplot(data=DT,aes(AGEPH))+theme_bw()
+g + geom_histogram(aes(y = (..count..)/sum(..count..)),binwidth=2,col=col,fill=fill)+labs(y="Relative frequency")
+```
+
+```{r, include=FALSE}
+g <- ggplot(data=DT,aes(BM))+theme_bw()
+g + geom_histogram(aes(y = (..count..)/sum(..count..)),binwidth=1,col=col,fill=fill)+labs(y="Relative frequency")
+```
+
+```{r, include=FALSE}
+# This function creates the barplots from the paper
+ggplot.bar <- function(DT,variable,xlab){
+  ggplot(data=DT, aes(as.factor(variable)), environment=environment()) + theme_bw() + 
+    geom_bar(aes(y = (..count..)/sum(..count..)),col=col,fill=fill) + labs(x=xlab,y=ylab)
+}
+```
+
+```{r, include=FALSE}
+# This function creates the histograms from the paper
+ggplot.hist <- function(DT,variable,xlab,binwidth){
+  ggplot(data=DT, aes(variable), environment=environment()) + theme_bw() + 
+    geom_histogram(aes(y = (..count..)/sum(..count..)),binwidth=binwidth,col=col,fill=fill) + 
+    labs(x=xlab,y=ylab)
+}
+```
+
+```{r, include=FALSE}
+# Getting insight in the claim frequency and severity components
+plot.eda.nclaims <- ggplot.bar(DT,DT$NCLAIMS,"nclaims")
+plot.eda.nclaims
+plot.eda.exp <- ggplot.hist(DT,DT$EXP,"exp",0.05)
+plot.eda.amount <- ggplot(data=DT.sev, aes(DT.sev$AMOUNT)) + geom_density(adjust=3,col=col,fill=fill) + xlim(0,1e4) + ylab(ylab) + xlab("amount")  + theme_bw()
+```
+
+```{r, include=FALSE}
+# Bar plot of factor variables
+plot.eda.coverage <- ggplot.bar(DT,DT$COVERAGE,"coverage")
+plot.eda.coverage
+plot.eda.fuel <- ggplot.bar(DT,DT$FUEL,"fuel")
+plot.eda.sex <- ggplot.bar(DT,DT$SEX,"sex")
+plot.eda.use <- ggplot.bar(DT,DT$USE,"use")
+plot.eda.fleet <- ggplot.bar(DT,DT$FLEET,"fleet")
+```
+
+```{r, include=FALSE}
+# Histograms of continuous variables
+plot.eda.ageph <- ggplot.hist(DT,DT$AGEPH,"ageph",2)
+plot.eda.ageph
+plot.eda.agec <- ggplot.hist(DT,DT$AGEC,"agec",1)
+plot.eda.bm <- ggplot.bar(DT,DT$BM,"bm")
+plot.eda.power <- ggplot.hist(DT,DT$POWER,"power",10)
+```
+
+```{r,include=FALSE}
+# Putting these together
+grid.arrange(plot.eda.nclaims,plot.eda.exp,plot.eda.amount,plot.eda.coverage,plot.eda.fuel,plot.eda.sex,plot.eda.use,plot.eda.fleet,plot.eda.ageph,plot.eda.power,plot.eda.agec,plot.eda.bm,ncol=4)
+```
+
+```{r,include=FALSE}
+# Two dimensional density for interaction effects
+# See http://ggplot2.tidyverse.org/reference/geom_density_2d.html
+plot.eda.agephpower <- ggplot(DT,aes(x=AGEPH,y=POWER)) + stat_density2d(aes(fill = ..level..),geom="polygon") 
+plot.eda.agephpower <- plot.eda.agephpower + scale_fill_gradient("Density",low="#99CCFF",high="#003366") 
+plot.eda.agephpower <- plot.eda.agephpower + theme_bw() + xlab("ageph") + ylab("power")
+```
+
+## Question 4
+
+In this section we explain how the three clusters `Low`, `Average`, `High` are created. The fiction `aggregate()` aggregates the exposure data `EXP` by the postal code `PC`. The second command binds the column `N` to the data frame `DT_PC` and contains again the exposure data `EXP`.  
+
+```{r, include=FALSE}
+DT_PC <- aggregate(EXP ~ PC, data=DT, length)
+DT_PC$N <- DT_PC$EXP
+```
+
+In the following graph three clusters Low, Average, High are created using the quantiles of the relative exposure. The relative exposure for all the municipalities is calculated. The relative exposure is defined as the total exposure in the municipality over the total exposure of all the municipalities and is corrected for the total shape area of the municipality. The cluster Low contains 20% of the municipalities with the lowest relative exposure, the cluster Average contains the municipalities with a relative exposure between the quantile 20% and 80% and the cluster High represents the 20% of municipalities containing the highest relative exposure. 
+
+```{r, include=FALSE}
+##setwd("/Users/pieterpijls/Documents/KU LEUVEN/MFAE/ADVANCED NON LIFE/Assignment 2/")
+
+# Get the shape file of Belgium
+readShapefile = function(){
+ # belgium_shape <- readOGR(dsn = path.expand(paste(getwd("~/Documents/KU LEUVEN/MFAE/ADVANCED NON LIFE/Assignment 2"),"/postcode",sep="")), layer = "npc96_region_Project1")
+  belgium_shape <- readOGR(dsn = path.expand(paste(getwd(),"/Shape file Belgie postcodes",sep="")), layer = "npc96_region_Project1")
+  belgium_shape <- spTransform(belgium_shape, CRS("+proj=longlat +datum=WGS84"))
+  belgium_shape$id <- row.names(belgium_shape)
+  return(belgium_shape)
+}
+belgium_shape = readShapefile()
+str(belgium_shape@data)
+belgium_shape@data <- merge(belgium_shape@data, DT_PC, by.x = "POSTCODE", by.y = "PC", all.x = TRUE)
+belgium_shape@data$freq <- belgium_shape@data$N/sum(belgium_shape@data$N, na.rm = TRUE)/belgium_shape@data$Shape_Area
+belgium_shape@data$freq_class <- cut(belgium_shape@data$freq, breaks = quantile(belgium_shape@data$freq,c(0,0.2,0.8,1),na.rm=TRUE), right = FALSE,include.lowest = TRUE, labels = c("low","average","high")) 
+belgium_shape_f <- fortify(belgium_shape)
+belgium_shape_f <- merge(belgium_shape_f, belgium_shape@data, all.x = TRUE)
+```
+
+```{r,echo=FALSE, fig.cap="Map of Belgium wth exposures"}
+plot.eda.map <- ggplot(belgium_shape_f, aes(long,lat, group = group)) + geom_polygon(aes(fill = belgium_shape_f$freq_class),colour="black",size=0.1)
+plot.eda.map <- plot.eda.map + theme_nothing(legend = TRUE) + labs(fill = "Relative\nfrequency") + scale_fill_brewer(palette="Blues", na.value = "white")
+plot.eda.map
+```
+
+
+# Block 2) Fit a flexible GAM for frequency to the data 
+## Question 5
+
+In this section we fit a GLM with only a factor variable. We selected the factor variable `fuel` to calibrate a Poisson GLM with an offset and a linear predictor that only uses the factor variable. We isolate the role of `fuel` in the model. The regression model is formulated as follows: the number of claims is dependent on the type of `fuel`. The latter is a dummy variable that is zero if the `fuel` type is diesel and one if the `fuel` type is gasoline. The model with one factor variable `fuel` looks as follows
+
+\[log(E(nclaims)) = log(exp) + \beta_0 + \beta_1coverage_{PO} +\beta_2fuel_{gasoline} \].
+
+The parameters of the model are given in Table 2. The coefficient of gasoline is -0.18451. This means that driving a gasoline-fueled car results in less claims than driving a diesel-fueled car as the coefficient is negative. Given that the $p$-value is smaller than $0.001$, this effect can be considered statistically significant. 
+
+```{r, echo=FALSE}
+## a) Factor variable
+glm.freq1 <- gam(NCLAIMS ~ FUEL+offset(log(EXP)),data=DT, family=poisson(link=log))
+#summary(glm.freq1)
+
+#  create latex table
+summary <- as.data.frame(summary.gam(glm.freq1)$p.table)
+
+kable(summary,caption = "GLM with only a factor variable", align='c',format="latex", booktabs = TRUE) %>%
+          kable_styling(latex_options = c("striped","hold_position"))
+```
+
+Next, we create a GAM model where `AHEPH` is a continuous numeric risk factor. For more details on this model consult the R code. 
+
+```{r, include=FALSE}
+# Here is example code for use of 'gam' in the mgcv package
+gam.freq2 <- gam(NCLAIMS ~ s(AGEPH), offset = log(EXP), data = DT, family = poisson(link = "log"))
+summary(gam.freq2)
+```
+
+```{r, include=FALSE}
+# Visualize the fitted smooth effect
+pred <- predict(gam.freq2, type = "terms", se = TRUE)
+x <- DT$AGEPH
+b <- pred$fit[,1]
+l <- pred$fit[,1] - qnorm(0.975) * pred$se.fit[,1]
+u <- pred$fit[,1] + qnorm(0.975) * pred$se.fit[,1]
+df <- unique(data.frame(x, b, l, u))
+
+p <- ggplot(df, aes(x = x))
+p <- p + geom_line(aes(y = b), size = 1,col="#003366")
+p <- p + geom_line(aes(y = l), size = 0.5, linetype = 2,col="#99CCFF")
+p <- p + geom_line(aes(y = u), size = 0.5, linetype = 2,col="#99CCFF")
+p <- p + xlab("ageph") + ylab(expression(hat(f)(ageph))) + theme_bw()
+p
+```
+
+## Question 6
+
+```{r, include=FALSE}
+a=min(DT$AGEPH):max(DT$AGEPH)
+yp.resp <- predict(gam.freq2, newdata=data.frame(AGEPH=a,EXP=1), type="response", se.fit=TRUE)
+```
+
+In this section we explore the differences and connection between 'pred' with 'type' is response', 'link' and 'terms'. When the type is set equal to 'terms' we get an intercept $\beta_0$ which is equal to the estimate of the intercept calculated from the GAM. We also get a fitted value for every age which indicates the deviation from the intercept. For example, an eighteen-year old has a deviation from the intercept $\beta_0$ of 0.91108. This positive coefficient is making an eighteen-year-old more risky. The `pred` function also calculates a standard error for every fitted value, for every age. If we want to calculate the average number of accidents for a particular age. We calculate it as follows:
+
+\[\text{Average number of accidents}  = \exp(intercept_{terms} + fit_{age.terms}). \]
+
+For an eighteen-year-old this comes down to: $\exp(-1.995266+0.911082126)=0.33$. When type is set equal to 'link' we only get a fitted value and a standard error for every age. The relation between 'terms' and 'links is the following. The fitted value calculated for a particular age when type equal to 'link' = the fitted value for the same age when + the intercept $\beta_0$ when type is equal to 'terms'. Thus $fit_{age.link} = fit_{age.terms} + intercept_{terms}$. We then calculate the average number of claims as the $\exp(fit_{age.link})$.
+
+The last type is 'response' which directly calculates the predicted number of claims that a person of age $X$ will report. Thus the average number of claims is given by $fit_{age.resp}$. Therefore the connection between all three methods can be described as follows: 
+\[fit_{age.resp} = \exp(intercept_{terms} + fit_{age.terms})= \exp(fit_{age.link})\]
+
+```{r, include=FALSE}
+# Emprical freq claims
+testdf <- subset(DT, DT$AGEPH==18)
+teststat <- sum(testdf$NCLAIMS)/nrow(testdf)
+teststat
+
+testdf <- subset(DT, DT$AGEPH==20)
+teststat <- sum(testdf$NCLAIMS)/nrow(testdf)
+teststat
+```
+ 
+## Question 7 
+
+```{r,  include=FALSE}
+gam.freq.linear <- gam(NCLAIMS ~ AGEPH, offset = log(EXP), data = DT, family = poisson(link = "log"))
+summary(gam.freq.linear)
+```
+
+In this section we explore four different ways to incorporate a continuous variable. Also we will try to incorporate the continuous variable `age` in four different ways, as a linear effect, age as a factor, five year bins of age and a smooth effect of `age`. In the following graph the solution of these four approaches is shown. In the graph of the factor effect of `age` we did not include the ages 93 until 95 because these were not significant. In each graph we see that the oldest people have the largest standard deviation and thus the largest confidence interval. The large standard error for older ages is because we have less data of people of those ages. We also observe that the confidence interval is the largest in the factor effect of `age` for every age. While it is the smallest for every age when taking into account the linear effect of `age`. Again because the factor effect of `age` uses per age less data points. While the linear effect of `age` uses all the data to plot a global relation. Making the confidence intervals smaller.
+
+```{r   , include=FALSE  }
+#approach 2: use ageph as factor variable
+DT.age.factor <- DT[c("ID","NCLAIMS","EXP","AGEPH")]
+DT.age.factor$AGEPH <- as.factor(DT.age.factor$AGEPH)
+
+gam.freq.factor <- gam(NCLAIMS ~ AGEPH, offset = log(EXP), data = DT.age.factor, family = poisson(link = "log"))
+summary(gam.freq.factor)
+
+
+```
+
+
+```{r   , include=FALSE  }
+#pproach 3: use predefined age bins of e.g. 5 years
+DT.age.bins <- DT[c("ID","NCLAIMS","EXP","AGEPH")]
+DT.age.bins$AGEPH <- cut(as.numeric(DT$AGEPH), breaks = 16, right = FALSE, include.lowest=TRUE, dig.lab = 2)
+DT.age.bins$AGEPH <- as.factor(DT.age.bins$AGEPH)
+gam.freq.bins <- gam(NCLAIMS ~ AGEPH, offset = log(EXP), data = DT.age.bins, family = poisson(link = "log"))
+summary(gam.freq.bins)
+```
+
+
+```{r   , include=FALSE  }
+# approach 4: use smooth effect of ageph
+DT$AGEPH <- as.numeric(DT$AGEPH)
+gam.freq.smooth <- gam(NCLAIMS ~ s(AGEPH), offset = log(EXP), data = DT, family = poisson(link = "log"))
+summary(gam.freq.smooth)
+```
+
+
+```{r   , include=FALSE  }
+#bring the graphs together
+yp.linear <-predict(gam.freq.linear, type="terms", se.fit=TRUE)
+x <- DT$AGEPH
+b <- yp.linear$fit[,1]
+l <- yp.linear$fit[,1] - qnorm(0.975) * yp.linear$se.fit[,1]
+u <- yp.linear$fit[,1] + qnorm(0.975) * yp.linear$se.fit[,1]
+df <- unique(data.frame( x,b, l, u))
+p.linear <- ggplot(df, aes(x = x))
+p.linear<- p.linear + geom_line(aes(y = b), size = 1,col="#003366")
+p.linear <- p.linear + geom_line(aes(y = l), size = 0.5, linetype = 2,col="#99CCFF")
+p.linear <- p.linear + geom_line(aes(y = u), size = 0.5, linetype = 2,col="#99CCFF")
+p.linear <- p.linear + xlab("ageph") + ylab(expression(hat(f)(ageph))) + theme_bw()+ggtitle("linear effect of age")
+
+
+
+
+yp.factor <-predict(gam.freq.factor, type="terms", se.fit=TRUE)
+
+x <- DT$AGEPH
+b <- yp.factor$fit[,1]
+l <- yp.factor$fit[,1] - qnorm(0.975) * yp.factor$se.fit[,1]
+u <- yp.factor$fit[,1] + qnorm(0.975) * yp.factor$se.fit[,1]
+df <- unique(data.frame(x,b, l, u))
+df <-subset(df, df$x!=c(95,94,93))
+p.factor <- ggplot(df, aes(x = x))
+p.factor <- p.factor + geom_line(aes(y = b), size = 1,col="#003366", group=1)
+p.factor <- p.factor + geom_line(aes(y = l), size = 0.5, linetype = 2,col="#99CCFF", group=1)
+p.factor <- p.factor + geom_line(aes(y = u), size = 0.5, linetype = 2,col="#99CCFF",group=1)
+p.factor <- p.factor + xlab("ageph") + ylab(expression(hat(f)(ageph))) + theme_bw()+ggtitle("Factor effect of age")
+
+
+
+yp.bins <-predict(gam.freq.bins,type="terms", se.fit=TRUE)
+
+x <- DT$AGEPH
+b <- yp.bins$fit[,1]
+l <- yp.bins$fit[,1] - qnorm(0.975) * yp.bins$se.fit[,1]
+u <- yp.bins$fit[,1] + qnorm(0.975) * yp.bins$se.fit[,1]
+df <- unique(data.frame( x,b, l, u))
+p.bins <- ggplot(df, aes(x = x))
+p.bins <- p.bins + geom_line(aes(y = b), size = 1,col="#003366")
+p.bins <- p.bins + geom_line(aes(y = l), size = 0.5, linetype = 2,col="#99CCFF")
+p.bins <- p.bins + geom_line(aes(y = u), size = 0.5, linetype = 2,col="#99CCFF")
+p.bins <- p.bins + xlab("ageph") + ylab(expression(hat(f)(ageph))) + theme_bw()+ ggtitle("5 years binned effect of age")
+
+
+
+yp.smooth <-predict(gam.freq.smooth,type="terms", se.fit=TRUE)
+
+x <- DT$AGEPH
+b <- yp.smooth$fit[,1]
+l <- yp.smooth$fit[,1] - qnorm(0.975) * yp.smooth$se.fit[,1]
+u <- yp.smooth$fit[,1] + qnorm(0.975) * yp.smooth$se.fit[,1]
+df <- unique(data.frame(x, b, l, u))
+p.smooth <- ggplot(df, aes(x = x))
+p.smooth <- p.smooth + geom_line(aes(y = b), size = 1,col="#003366")
+p.smooth <- p.smooth + geom_line(aes(y = l), size = 0.5, linetype = 2,col="#99CCFF")
+p.smooth <- p.smooth + geom_line(aes(y = u), size = 0.5, linetype = 2,col="#99CCFF")
+p.smooth <- p.smooth + xlab("ageph") + ylab(expression(hat(f)(ageph))) + theme_bw()+ ggtitle("Smooth effect of age")
+```
+
+
+```{r, echo=FALSE, fig.cap="linear effect of 'age', 'age' as factor, ad hoc 'age' bins and smooth effect of 'age'" }
+grid.arrange(p.linear,p.factor,p.bins,p.smooth,ncol=2,nrow=2)
+```
+
+In the Table 3 we compare the expected claim frequency between the four models for a 23 year old over the period of one year. We can see that the expected claim frequency for all four models are close to each other. The linear model predict the lowest claim frequency while the factor model predicts the highest. The standard error is the highest for the factor model and the lowest for the linear model. The binning and smoothing approach report results in between the factor and the linear model.
+
+```{r, echo=F}
+yp.linear <-predict(gam.freq.linear,newdata= data.frame(AGEPH=23,EXP=1), type="response", se.fit=TRUE)
+yp.factor <-predict(gam.freq.factor,newdata= data.frame(AGEPH="23",EXP=1), type="response", se.fit=TRUE)
+yp.bins <-predict(gam.freq.bins,newdata= data.frame(AGEPH="[23,28)",EXP=1),type="response", se.fit=TRUE)
+yp.smooth <-predict(gam.freq.smooth,newdata= data.frame(AGEPH=23,EXP=1),type="response", se.fit=TRUE)
+
+summary <- matrix(c(yp.linear$fit,yp.factor$fit,yp.bins$fit,yp.smooth$fit,yp.linear$se,yp.factor$se,yp.bins$se,yp.smooth$se), ncol=4,byrow = TRUE)
+rownames(summary) <-c("Expected claim frecquency","Standard error")
+colnames(summary)<-c("linear","factor","bins","smooth")
+
+kable(summary,caption = "Expected claim frequency for a 23 year old", align='c',format="latex", booktabs = TRUE) %>%
+          kable_styling(latex_options = c("striped","hold_position"))
+```
+
+
+```{r   , include=FALSE  }
+# We continue with fitting GAM's
+
+# Function to plot the GAM effects
+ggplot.gam <- function(model,variable,gam_term,xlabel,ylabel){
+  pred <- predict(model, type = "terms", se = TRUE)
+  col_index <- which(colnames(pred$fit)==gam_term)
+  x <- variable
+  b <- pred$fit[, col_index]
+  l <- pred$fit[, col_index] - qnorm(0.975) * pred$se.fit[, col_index]
+  u <- pred$fit[, col_index] + qnorm(0.975) * pred$se.fit[, col_index]
+  df <- unique(data.frame(x, b, l, u))
+  p <- ggplot(df, aes(x = x))
+  p <- p + geom_line(aes(y = b), size = 1,col="#003366")
+  p <- p + geom_line(aes(y = l), size = 0.5, linetype = 2,col="#99CCFF")
+  p <- p + geom_line(aes(y = u), size = 0.5, linetype = 2,col="#99CCFF")
+  p <- p + xlab(xlabel) + ylab(ylabel) + theme_bw()
+  p
+}
+
+plot.gam.freq.ageph <- ggplot.gam(gam.freq2, DT$AGEPH, "s(AGEPH)", "ageph", expression(hat(f)(ageph)))
+plot.gam.freq.ageph
+```
+
+```{r   , include=FALSE  }
+# c) Interaction effect
+gam.freq3 <- gam(NCLAIMS ~ s(AGEPH,POWER), offset = log(EXP), data = DT, family = poisson(link = "log"))
+summary(gam.freq3)
+
+# Extend data for plotting 
+getExtendedAgephPower <- function(){
+  ageph <- seq(min(DT$AGEPH),max(DT$AGEPH))
+  power <- seq(min(DT$POWER),max(DT$POWER))
+  agephpower <- expand.grid(ageph,power)
+  DText_agephpower <- data.frame("AGEPH"=agephpower$Var1,"POWER"=agephpower$Var2)
+  return(DText_agephpower)
+}
+DText_agephpower <- getExtendedAgephPower()
+
+pred <- predict(gam.freq3,DText_agephpower,type = "terms",terms = "s(AGEPH,POWER)")
+GAMext.freq.AGEPHPOWER <- data.frame(DText_agephpower$AGEPH,DText_agephpower$POWER,pred)
+names(GAMext.freq.AGEPHPOWER) <- c("ageph","power","s")
+
+plot.gam.freq.agephpower <- ggplot(data=GAMext.freq.AGEPHPOWER,aes(ageph,power,z=s)) + geom_raster(aes(fill=s)) + theme_bw()
+plot.gam.freq.agephpower <- plot.gam.freq.agephpower + scale_fill_gradient(expression(hat(f)(ageph,power)),low="#99CCFF",high="#003366") 
+plot.gam.freq.agephpower <- plot.gam.freq.agephpower + stat_contour(breaks=seq(-0.7,0.7,0.05),lty=2,colour="white") + stat_contour(breaks=0,lty=1,colour="white")
+```
+
+```{r, include=FALSE}
+# d) Interaction effect + main effects
+gam.freq4 <- gam(NCLAIMS ~ s(AGEPH) + s(POWER) + ti(AGEPH,POWER,bs="tp"), offset = log(EXP), data = DT, family = poisson(link = "log"))
+summary(gam.freq4)
+
+plot.gam.freq.ageph <- ggplot.gam(gam.freq4,DT$AGEPH,"s(AGEPH)","ageph",expression(hat(f)(ageph)))
+plot.gam.freq.ageph
+plot.gam.freq.power <- ggplot.gam(gam.freq4,DT$POWER,"s(POWER)","power",expression(hat(f)(power)))
+plot.gam.freq.power
+
+DText_agephpower <- getExtendedAgephPower()
+pred <- predict(gam.freq4, DText_agephpower, type = "terms", terms = "ti(AGEPH,POWER)")
+GAMext.freq.AGEPHPOWER <- data.frame(DText_agephpower$AGEPH, DText_agephpower$POWER,pred)
+names(GAMext.freq.AGEPHPOWER) <- c("ageph","power","s")
+
+plot.gam.freq.agephpower <- ggplot(data=GAMext.freq.AGEPHPOWER,aes(ageph,power,z=s)) + geom_raster(aes(fill=s)) + theme_bw()
+plot.gam.freq.agephpower <- plot.gam.freq.agephpower + scale_fill_gradient(expression(hat(f)(ageph,power)),low="#99CCFF",high="#003366") 
+plot.gam.freq.agephpower <- plot.gam.freq.agephpower + stat_contour(breaks=seq(-0.7,0.7,0.05),lty=2,colour="white") + stat_contour(breaks=0,lty=1,colour="white")
+```
+
+```{r, include=FALSE  }
+# e) Spatial effect
+gam.freq5 <- gam(NCLAIMS ~ s(LONG,LAT), offset = log(EXP), data = DT, family = poisson(link = "log"))
+summary(gam.freq5)
+
+belgium_shape = readShapefile()
+str(belgium_shape@data)
+str(coordinates(belgium_shape))
+postcode_DT <- data.frame(PC=belgium_shape@data$POSTCODE,LONG=coordinates(belgium_shape)[,1],LAT=coordinates(belgium_shape)[,2])
+pred = predict(gam.freq5,newdata = postcode_DT,type = "terms",terms = "s(LONG,LAT)")
+DT_pred = data.table("PC"=postcode_DT$PC,"LONG"=postcode_DT$LONG,"LAT"=postcode_DT$LAT,pred)
+belgium_shape@data <- merge(belgium_shape@data,DT_pred,by.x="POSTCODE",by.y="PC",all.x=TRUE)
+belgium_shape_f <- fortify(belgium_shape)
+belgium_shape_f <- merge(belgium_shape_f, belgium_shape@data,by="id",all.x=TRUE)
+
+plot.gam.freq.map <- ggplot(belgium_shape_f, aes(long, lat, group = group)) + geom_polygon(aes(fill = belgium_shape_f$`s(LONG,LAT)`))
+plot.gam.freq.map <- plot.gam.freq.map + theme_nothing(legend = TRUE) + scale_fill_gradient(low="#99CCFF",high="#003366") + labs(fill = expression(hat(f)(long,lat)))
+plot.gam.freq.map 
+```
+
+## Question 8
+
+In this section we calibrate the optimal frequency model from Henckaerts et al. (2017) (check R code for more details). We visualize the fitted effects. 
+
+```{r, include=FALSE  }
+gam.freq <- gam(NCLAIMS ~ COVERAGE + FUEL + s(AGEPH) + s(POWER) + s(BM) + ti(AGEPH,POWER,bs="tp") 
+                + s(LONG,LAT), offset = log(EXP), data = DT, family = poisson(link = "log"))
+summary(gam.freq)
+
+plot.gam.freq.ageph <- ggplot.gam(gam.freq,DT$AGEPH,"s(AGEPH)","ageph",expression(hat(f)[1](ageph)))
+plot.gam.freq.power <- ggplot.gam(gam.freq,DT$POWER,"s(POWER)","power",expression(hat(f)[2](power)))
+plot.gam.freq.bm <- ggplot.gam(gam.freq,DT$BM,"s(BM)","bm",expression(hat(f)[3](bm)))
+
+DText_agephpower <- getExtendedAgephPower()
+DText_agephpower$COVERAGE <- DT$COVERAGE[1]
+DText_agephpower$FUEL <- DT$FUEL[1]
+DText_agephpower[c("BM", "LONG", "LAT","EXP")] <- c(DT$BM[1], DT$LONG[1], DT$LAT[1], DT$EXP[1])
+pred <- predict(gam.freq,DText_agephpower,type = "terms",terms = "ti(AGEPH,POWER)")
+GAMext.freq.AGEPHPOWER <- data.table(DText_agephpower$AGEPH,DText_agephpower$POWER,pred)
+names(GAMext.freq.AGEPHPOWER) <- c("ageph","power","s")
+
+plot.gam.freq.agephpower <- ggplot(data=GAMext.freq.AGEPHPOWER,aes(ageph,power,z=s)) + geom_raster(aes(fill=s)) + theme_bw()
+plot.gam.freq.agephpower <- plot.gam.freq.agephpower + scale_fill_gradient(expression(hat(f)[4](ageph,power)),low="#99CCFF",high="#003366") 
+plot.gam.freq.agephpower <- plot.gam.freq.agephpower + stat_contour(breaks=seq(-0.7,0.7,0.05),lty=2,colour="white") + stat_contour(breaks=0,lty=1,colour="white")
+
+belgium_shape = readShapefile()
+DT_maps <- data.frame(PC=belgium_shape@data$POSTCODE,LONG=coordinates(belgium_shape)[,1],LAT=coordinates(belgium_shape)[,2])
+DT_maps$COVERAGE <- DT$COVERAGE[1]
+DT_maps$FUEL <- DT$FUEL[1]
+DT_maps[c("BM", "AGEPH", "POWER","EXP")] <- c(DT$BM[1], DT$AGEPH[1], DT$POWER[1], DT$EXP[1])
+pred = predict(gam.freq,newdata = DT_maps,type = "terms",terms = "s(LONG,LAT)")
+DT_pred = data.table("PC"=DT_maps$PC,"LONG"=DT_maps$LONG,"LAT"=DT_maps$LAT,pred)
+belgium_shape@data <- merge(belgium_shape@data,DT_pred,by.x="POSTCODE",by.y="PC",all.x=TRUE)
+belgium_shape_f <- fortify(belgium_shape)
+belgium_shape_f <- merge(belgium_shape_f, belgium_shape@data,by="id",all.x=TRUE)
+
+plot.gam.freq.map <- ggplot(belgium_shape_f, aes(long, lat, group = group)) + geom_polygon(aes(fill = belgium_shape_f$`s(LONG,LAT)`))
+plot.gam.freq.map <- plot.gam.freq.map + theme_nothing(legend = TRUE) + scale_fill_gradient(low="#99CCFF",high="#003366") + labs(fill = expression(hat(f)[5](long,lat)))
+
+layout <- rbind(c(1,1,2,2,3,3),
+             c(4,4,4,5,5,5))
+```
+
+The top row of the figure shows the smooth effects of the respective risk factors. The bottom left panel shows the interaction effect between ageph and power. The bottom right panel shows the fitted spatial effect.
+
+```{r, echo=FALSE, fig.cap="Top row"}
+grid.arrange(plot.gam.freq.ageph,plot.gam.freq.power,plot.gam.freq.bm,plot.gam.freq.agephpower,plot.gam.freq.map,layout_matrix=layout)
+```
+
+# Block 3) Bin the spatial effect 
+
+## Question 9
+
+```{r, include=FALSE}
+pred = predict(gam.freq, newdata = DT_maps, type = "terms", terms = "s(LONG,LAT)")
+GAM.freq.LONGLAT = data.frame("pc"=factor(DT_maps$PC),"long"=DT_maps$LONG,"lat"=DT_maps$LAT,pred)
+names(GAM.freq.LONGLAT) = c("pc","long","lat","s")
+GAM.freq.LONGLAT <- GAM.freq.LONGLAT[order(GAM.freq.LONGLAT$pc), ]
+
+# 'Fisher Jenks' with 5 bins
+num_bins = 5
+
+classint.fisher = classIntervals(GAM.freq.LONGLAT$s,num_bins,style="fisher")
+
+# Plot empirical cdf with class intervals
+crp=colorRampPalette(c("#99CCFF","#003366"))  
+plot(classint.fisher,crp(num_bins),xlab=expression(hat(f)[5](long,lat)),main="Fisher")
+
+# Plot maps
+belgium_shape <- readShapefile()
+str(belgium_shape@data)
+belgium_shape@data <- merge(belgium_shape@data,GAM.freq.LONGLAT[c("pc","s")], by.x="POSTCODE", by.y="pc", all.x=TRUE)
+belgium_shape@data$class_fisher <- cut(as.numeric(belgium_shape@data$s), breaks = classint.fisher$brks, right = FALSE, include.lowest=TRUE, dig.lab = 2) 
+belgium_shape_f <- fortify(belgium_shape)
+belgium_shape_f <- merge(belgium_shape_f, belgium_shape@data, by="id", all.x=TRUE)
+
+plot.bin.map.fisher <- ggplot(belgium_shape_f, aes(long,lat, group = group)) + geom_polygon(aes(fill = belgium_shape_f$class_fisher)) + theme_nothing(legend = TRUE) + labs(fill = "Fisher") + scale_fill_brewer(palette="Blues", na.value = "white") 
+plot.bin.map.fisher
+```
+
+```{r, include=FALSE}
+# Equal
+
+# 'Fisher Jenks' with 5 bins
+num_bins = 5
+
+classint.equal = classIntervals(GAM.freq.LONGLAT$s,num_bins,style="equal")
+
+# Plot empirical cdf with class intervals
+crp=colorRampPalette(c("#99CCFF","#003366"))  
+plot(classint.equal,crp(num_bins),xlab=expression(hat(f)[5](long,lat)),main="Equal")
+
+# Plot maps
+belgium_shape <- readShapefile()
+str(belgium_shape@data)
+belgium_shape@data <- merge(belgium_shape@data,GAM.freq.LONGLAT[c("pc","s")], by.x="POSTCODE", by.y="pc", all.x=TRUE)
+belgium_shape@data$class_equal <- cut(as.numeric(belgium_shape@data$s), breaks = classint.equal$brks, right = FALSE, include.lowest=TRUE, dig.lab = 2) 
+belgium_shape_e <- fortify(belgium_shape)
+belgium_shape_e <- merge(belgium_shape_e, belgium_shape@data, by="id", all.x=TRUE)
+
+plot.bin.map.equal <- ggplot(belgium_shape_e, aes(long,lat, group = group)) + geom_polygon(aes(fill = belgium_shape_e$class_equal)) + theme_nothing(legend = TRUE) + labs(fill = "Equal") + scale_fill_brewer(palette="Blues", na.value = "white") 
+plot.bin.map.equal
+```
+
+```{r, include=FALSE}
+# Quantile
+
+# 'Fisher Jenks' with 5 bins
+num_bins = 5
+
+classint.quantile = classIntervals(GAM.freq.LONGLAT$s,num_bins,style="quantile")
+
+# Plot empirical cdf with class intervals
+crp=colorRampPalette(c("#99CCFF","#003366"))  
+plot(classint.quantile,crp(num_bins),xlab=expression(hat(f)[5](long,lat)),main="Quantile")
+
+# Plot maps
+belgium_shape <- readShapefile()
+str(belgium_shape@data)
+belgium_shape@data <- merge(belgium_shape@data,GAM.freq.LONGLAT[c("pc","s")], by.x="POSTCODE", by.y="pc", all.x=TRUE)
+belgium_shape@data$class_quantile <- cut(as.numeric(belgium_shape@data$s), breaks = classint.quantile$brks, right = FALSE, include.lowest=TRUE, dig.lab = 2) 
+belgium_shape_q <- fortify(belgium_shape)
+belgium_shape_q <- merge(belgium_shape_q, belgium_shape@data, by="id", all.x=TRUE)
+
+plot.bin.map.quantile <- ggplot(belgium_shape_q, aes(long,lat, group = group)) + geom_polygon(aes(fill = belgium_shape_q$class_quantile)) + theme_nothing(legend = TRUE) + labs(fill = "Quantile") + scale_fill_brewer(palette="Blues", na.value = "white") 
+plot.bin.map.quantile
+```
+
+```{r, include=FALSE}
+# Complete
+
+# 'Fisher Jenks' with 5 bins
+num_bins = 5
+
+classint.complete = classIntervals(GAM.freq.LONGLAT$s,num_bins,style="hclust")
+#classint.complete <- hclust(GAM.freq.LONGLAT$s, method="complete",members = as.vector(length=length(GAM.freq.LONGLAT$s)))
+
+# Plot empirical cdf with class intervals
+crp=colorRampPalette(c("#99CCFF","#003366"))  
+plot(classint.complete,crp(num_bins),xlab=expression(hat(f)[5](long,lat)),main="Complete")
+
+# Plot maps
+belgium_shape <- readShapefile()
+str(belgium_shape@data)
+belgium_shape@data <- merge(belgium_shape@data,GAM.freq.LONGLAT[c("pc","s")], by.x="POSTCODE", by.y="pc", all.x=TRUE)
+belgium_shape@data$class_complete <- cut(as.numeric(belgium_shape@data$s), breaks = classint.complete$brks, right = FALSE, include.lowest=TRUE, dig.lab = 2) 
+belgium_shape_c <- fortify(belgium_shape)
+belgium_shape_c <- merge(belgium_shape_c, belgium_shape@data, by="id", all.x=TRUE)
+
+plot.bin.map.complete <- ggplot(belgium_shape_c, aes(long,lat, group = group)) + geom_polygon(aes(fill = belgium_shape_c$class_complete)) + theme_nothing(legend = TRUE) + labs(fill = "Complete") + scale_fill_brewer(palette="Blues", na.value = "white") 
+plot.bin.map.complete
+```
+
+In this section we use different clustering strategies for binning the spatial effect. We highlight the differences both graphical and statistical. The first clustering approach, "equal intervals", divides the range of the spatial effect in $k = 5$ bins of equal length. The five bins each have a range of $(0.3405166-(-0.4808574))/5 = 0.1642748$ and they have a number of 39, 263, 498, 235 and 111 municipalities respectively. Thus the majority of the municipalities is put into the middle bin, whereas the first and last bin almost have no municipalities.
+
+The second clustering approach, "quantile binning", results in $k = 5$ bins, where each bin contains approximately $1146/k$ municipalities. The resulting five bins thus have 229, 229, 230, 228 and 230 municipalities respectively. Comparing this approach to the first one, we see some major differences. Municipalities with similar spatial riskiness are not grouped together, because the bins are too wide in the extreme ends of the support (where data is scarce). These ends represent the respective least and most riskiness thus they should be binned more narrowly together. 
+
+```{r, echo=FALSE, fig.cap="the empirical cumulative density function of the fitted spatial effect in combination with the fice bins produced by the four different binning methods."}
+par(mfrow=c(2,2))
+plot(classint.equal,crp(num_bins),xlab=expression(hat(f)[5](long,lat)),main="Equal")
+plot(classint.quantile,crp(num_bins),xlab=expression(hat(f)[5](long,lat)),main="Quantile")
+plot(classint.complete,crp(num_bins),xlab=expression(hat(f)[5](long,lat)),main="Complete")
+plot(classint.fisher,crp(num_bins),xlab=expression(hat(f)[5](long,lat)),main="Fisher")
+```
+
+The third approach, "complete linkage", performs hierarchical clustering. This means that initially each municipality forms its own bin and in every iteration the two bins closest to each other are merged. The resulting five bins $k$ have 39, 140, 466, 325 and 176 municipalities respectively. The majority of the municipalities is grouped into the third bin, whereas few municipalities are grouped into the first bin. This approach resembles the first one in output. 
+
+The fourth approach, "Fisher's natural breaks" maximizes the homogeneity within bins. The resulting five bins have 86, 231, 299, 354, 176 municipalities respectively. These bins $k$ seem to be the most homogeneous and a good compromise between the first and second approach.
+
+```{r, echo=FALSE, fig.cap="maps of Belgium with the municipalities grouped into five distint bins based on the intervals produced by the four different binning methods for the spatial effect."}
+grid.arrange(plot.bin.map.equal,plot.bin.map.quantile,plot.bin.map.complete,plot.bin.map.fisher,ncol=2)
+```
+
+In Table 4 we calculate the goodness-of-fit (GVF) and tabular accuracy index (TAI) using $k=5$ bins. The Fisher's natural breaks algorithm outperforms the other models for both the GVF and TAI. Therefore, Fisher's algorithm is our preferred method to bin the spatial effect from the frequency model. 
+
+```{r, echo=FALSE}
+summary <- matrix( c(jenks.tests(classint.equal)[2:3],jenks.tests(classint.quantile)[2:3],jenks.tests(classint.complete)[2:3],jenks.tests(classint.fisher)[2:3]), ncol= 2, byrow=TRUE)
+
+colnames(summary) <- c("GVF","TAI")
+rownames(summary) <- c("Equal","Quantile","Complete","Fisher")
+kable(summary,caption = "The GVF and TAI for the different binning methods with five bins",  align='c',format="latex", booktabs = TRUE) %>%
+          kable_styling(latex_options = c("striped","hold_position")) 
+```
+
+
+## Question 10
+
+```{r, include=FALSE}
+# Q10: bin the spatial effect and refit
+DT.geo <- DT[c("ID","NCLAIMS","EXP","COVERAGE","FUEL","AGEPH","BM","POWER","PC")]
+DT.geo <- merge(DT.geo,GAM.freq.LONGLAT,by.x="PC",by.y="pc",all.x = TRUE)
+
+#cut s according to fisher bins and create new column
+DT.geo$GEO <- cut(DT.geo$s, breaks = classint.fisher$brks,na.rm=TRUE,labels=c( "(-0.48,-0.27]" ,"(-0.27,-0.14]", "(-0.14,-0.036]","(-0.036,0.11]","(0.11,0.34]"))
+```
+
+In this section we bin the fitted spatial effect using 5 bins and Fisher-Jenks (check R code for more details). Next, we re-calibrate the `gam` when the smooth spatial effect is replaced with the clusters. This is model (9) in Henckaerts et al. (2017).
+
+```{r, include=FALSE}
+# Refit GAM
+gam.freq.geo <- gam(NCLAIMS ~ COVERAGE + FUEL + s(AGEPH) + s(BM) + s(POWER) + ti(AGEPH,POWER,bs="tp") +
+                GEO, offset=log(EXP) , data = DT.geo, family = poisson(link = "log"))
+summary(gam.freq.geo)
+```
+
+
+# Block 4) Bin the continuous and interaction effects 
+
+In this section we construct the bins based on the fitted smooth functions on the continuous risk factors. 
+
+```{r, include=FALSE}
+# Get GAM data which will serve as input for the trees
+
+# We adjust the function and add argument newdata to specify on which data we like to make predictions. 
+
+getGAMdata_single = function(GAMmodel,newdata,term,var,varname){
+  pred = predict(GAMmodel, newdata=newdata , type = "terms", terms = term)
+  DT_pred = data.frame("x"=var, pred)[order(x),]
+  names(DT_pred) = c("x","s")
+  DT_unique = unique(DT_pred)
+  DT_exp <- aggregate(s ~ x, data=DT_pred, length)
+  DT_exp$exp <- DT_exp$s
+  DT_exp <- DT_exp[c("x","exp")]
+  GAM_data = merge(DT_unique,DT_exp,by="x")
+  names(GAM_data) = c(varname,"s","exp")
+  GAM_data = GAM_data[which(GAM_data$exp!=0),]
+  return(GAM_data)
+}
+getGAMdata_int = function(GAMmodel,newdata,term,var1,var2,varname1,varname2){
+  pred <- predict(GAMmodel, newdata=newdata ,type = "terms",terms = term)
+  DT_pred <- data.frame("x"=var1,"y"=var2, pred)   
+  DT_pred <- with(DT_pred, DT_pred[order(x,y),])
+  names(DT_pred) = c("x","y","s")
+  DT_unique = unique(DT_pred)
+  DT_exp <- aggregate(s ~ x+y, data=DT_pred, length)
+  DT_exp$exp <- DT_exp$s
+  DT_exp <- DT_exp[c("x","y","exp")]
+  GAM_data = merge(DT_unique,DT_exp,by=c("x","y"))
+  names(GAM_data) = c(varname1,varname2,"s","exp")
+  GAM_data = GAM_data[which(GAM_data$exp!=0),]
+  return(GAM_data)
+}
+```
+
+```{r, include=FALSE}
+# We adjust the function and add argument newdata to specify on which data we like to make predictions. 
+
+GAM.freq.AGEPH <- getGAMdata_single(GAMmodel=gam.freq.geo,newdata=DT.geo,term="s(AGEPH)",var=DT.geo$AGEPH,varname="ageph")
+GAM.freq.BM = getGAMdata_single(gam.freq.geo,newdata=DT.geo,"s(BM)",DT$BM,"bm")
+GAM.freq.POWER = getGAMdata_single(gam.freq.geo,newdata=DT.geo,"s(POWER)",DT$POWER,"power")
+GAM.freq.AGEPHPOWER = getGAMdata_int(gam.freq.geo,newdata=DT.geo,"ti(AGEPH,POWER)",DT$AGEPH,DT$POWER,"ageph","power")
+
+DText_agephpower <- getExtendedAgephPower()
+DText_agephpower$COVERAGE <- DT$COVERAGE[1] 
+DText_agephpower$FUEL <- DT$FUEL[1] 
+DText_agephpower[c("BM", "LONG", "LAT","EXP")] <- c(DT$BM[1], DT$LONG[1], DT$LAT[1], DT$EXP[1])
+pred <- predict(gam.freq,DText_agephpower,type = "terms",terms = "ti(AGEPH,POWER)")
+GAMext.freq.AGEPHPOWER <- data.frame(DText_agephpower$AGEPH,DText_agephpower$POWER,pred)
+names(GAMext.freq.AGEPHPOWER) <- c("ageph","power","s")
+```
+
+```{r, include=FALSE}
+source("evtree.R")
+
+# Set the control parameters
+ctrl.freq = evtree.control(minbucket=0.05*nrow(DT),alpha=550,maxdepth=5)
+
+# Fit the trees
+evtree.freq.AGEPH <- evtree(s ~ ageph,data = GAM.freq.AGEPH,weights=exp,control=ctrl.freq)
+evtree.freq.AGEPH # check with the paper!
+evtree.freq.BM <- evtree(s ~ bm,data = GAM.freq.BM,weights=exp,control=ctrl.freq)
+evtree.freq.BM
+evtree.freq.POWER <- evtree(s ~ power,data = GAM.freq.POWER,weights=exp,control=ctrl.freq)
+evtree.freq.POWER
+evtree.freq.AGEPHPOWER <- evtree(s ~ ageph + power,data = GAM.freq.AGEPHPOWER,weights=exp,control=ctrl.freq)
+evtree.freq.AGEPHPOWER
+```
+
+```{r, include=FALSE}
+# EVTREE splits
+splits_evtree = function(evtreemodel,newdata,GAMvar,DTvar){
+  preds=predict(evtreemodel,newdata=newdata,type="node")
+  nodes=data.frame("x"=GAMvar,"nodes"=preds)
+  nodes$change=c(0,pmin(1,diff(nodes$nodes)))
+  splits_evtree=unique(c(min(DTvar),nodes$x[which(nodes$change==1)],max(DTvar)))
+  return(splits_evtree)
+}
+
+splits2D_evtree = function(evtreemodel,GAMdata,GAMdata_X,GAMdata_Y){
+  pred = predict(evtreemodel,GAMdata,type="response")
+  values <- data.frame("X"=GAMdata_X,"Y"=GAMdata_Y,"pred"=pred)
+  min.X <- as.numeric(tapply(values$X, values$pred, min))
+  min.Y <- as.numeric(tapply(values$Y, values$pred, min))
+  max.X <- as.numeric(tapply(values$X, values$pred, max))
+  max.Y <- as.numeric(tapply(values$Y, values$pred, max))
+  splits_2D_evtree <- data.frame("xmin"=min.X,"xmax"=max.X,"ymin"=min.Y,"ymax"=max.Y)
+  return(splits_2D_evtree)
+}
+```
+
+```{r, include=FALSE}
+# we have to adjust function again and add newdata argument
+splits.freq.AGEPH = splits_evtree(evtreemodel=evtree.freq.AGEPH,newdata=GAM.freq.AGEPH,GAMvar=GAM.freq.AGEPH$ageph,DTvar=DT$AGEPH)
+splits.freq.AGEPH
+splits.freq.BM = splits_evtree(evtree.freq.BM,newdata=GAM.freq.BM,GAM.freq.BM$bm,DT$BM)
+splits.freq.BM
+splits.freq.POWER = splits_evtree(evtree.freq.POWER,newdata=GAM.freq.POWER,GAM.freq.POWER$power,DT$POWER)
+splits.freq.POWER
+
+splits.freq.AGEPHPOWER = splits2D_evtree(
+                evtreemodel=evtree.freq.AGEPHPOWER,
+                #newdata=GAMext.freq.AGEPHPOWER,
+                GAMdata=GAMext.freq.AGEPHPOWER,
+                GAMdata_X=GAMext.freq.AGEPHPOWER$ageph,
+                GAMdata_Y=GAMext.freq.AGEPHPOWER$power)
+
+#splits.freq.AGEPHPOWER = splits2D_evtree(evtree.freq.AGEPHPOWER,newdata=GAMext.freq.AGEPHPOWER,GAMext.freq.AGEPHPOWER,GAMext.freq.AGEPHPOWER$ageph,GAMext.freq.AGEPHPOWER$power)
+splits.freq.AGEPHPOWER
+
+# Plot the bins
+plot.bin.freq.ageph = ggplot.gam(gam.freq,DT$AGEPH,"s(AGEPH)","ageph",expression(hat(f)[1](ageph))) + geom_vline(xintercept = splits.freq.AGEPH[2:(length(splits.freq.AGEPH)-1)])
+plot.bin.freq.power = ggplot.gam(gam.freq,DT$POWER,"s(POWER)","power",expression(hat(f)[2](power))) + geom_vline(xintercept = splits.freq.POWER[2:(length(splits.freq.POWER)-1)])
+plot.bin.freq.bm = ggplot.gam(gam.freq,DT$BM,"s(BM)","bm",expression(hat(f)[3](bm))) + geom_vline(xintercept = splits.freq.BM[2:(length(splits.freq.BM)-1)])
+
+plot.bin.freq.agephpower <- ggplot(data=GAMext.freq.AGEPHPOWER,aes(ageph,power)) + geom_raster(aes(fill=s)) + theme_bw() +
+  scale_fill_gradient(expression(hat(f)[4](ageph,power)),low="#99CCFF",high="#003366") +
+  stat_contour(aes(z=s),breaks=seq(-0.7,0.7,0.05),lty=2,colour="white") + stat_contour(aes(z=s),breaks=0,lty=1,colour="white") +
+  geom_segment(aes(x=xmin,y=ymin,xend=xmin,yend=ymax),data=splits.freq.AGEPHPOWER) +
+  geom_segment(aes(x=xmin,y=ymin,xend=xmax,yend=ymin),data=splits.freq.AGEPHPOWER) + 
+  geom_segment(aes(x=xmin,y=ymax,xend=xmax,yend=ymax),data=splits.freq.AGEPHPOWER) + 
+  geom_segment(aes(x=xmax,y=ymin,xend=xmax,yend=ymax),data=splits.freq.AGEPHPOWER)
+```
+
+```{r, echo=FALSE, fig.cap="Binning intervals for the continuous effects"}
+grid.arrange(plot.bin.freq.ageph,plot.bin.freq.power,plot.bin.freq.bm,plot.bin.freq.agephpower,ncol=2)
+```
+
+## Question 11
+
+In this section we calibrate the final `glm` proposed in Henckaerts et al. (2017) (see Appendix). Within each risk factor the level with the highest exposure is used as the reference level. We use the `relevel` instruction to accomplish this. 
+
+```{r, include=FALSE}
+# Fit a GLM with binned variables 
+
+# Create binned dataset
+DT.freq.bin <- DT.geo[c("ID","NCLAIMS","EXP","COVERAGE","FUEL", "GEO")]
+DT.freq.bin$AGEPH <- cut(DT$AGEPH, breaks=splits.freq.AGEPH, 
+                     labels=c("18-26", "26-29", "29-33", "33-51", "51-56", 
+                              "56-61", "61-73", "73-95"), right=FALSE)
+DT.freq.bin$BM <- cut(DT$BM, breaks=splits.freq.BM, 
+                     labels=c("0-1","1-2", "2-3", "3-7", "7-9", "9-11", "11-22"), right=FALSE)
+DT.freq.bin$POWER <- cut(DT$POWER, breaks=splits.freq.POWER, 
+                     labels=c("10-36", "36-45", "45-75", "75-243"), right=FALSE)
+DT.freq.bin$AGEPHPOWER <- round(predict(evtree.freq.AGEPHPOWER,data.frame("ageph"=DT$AGEPH,"power"=DT$POWER),type="response"),digits=3)
+DT.freq.bin$AGEPHPOWER[abs(DT.freq.bin$AGEPHPOWER)<0.01] <- 0
+DT.freq.bin$AGEPHPOWER <- as.factor(DT.freq.bin$AGEPHPOWER)
+
+DT.freq.bin$GEO <- as.factor(DT.freq.bin$GEO)
+
+# Choose reference levels for the GLM (most exposure)
+DT.freq.bin$AGEPH = relevel(DT.freq.bin$AGEPH, "33-51")
+DT.freq.bin$BM = relevel(DT.freq.bin$BM, "0-1")
+DT.freq.bin$POWER = relevel(DT.freq.bin$POWER, "45-75")
+DT.freq.bin$AGEPHPOWER = relevel(DT.freq.bin$AGEPHPOWER, "0") # NOG DOEN, KLOPT NIET!!
+DT.freq.bin$FUEL = relevel(DT.freq.bin$FUEL, "gasoline")
+DT.freq.bin$GEO = relevel(DT.freq.bin$GEO, "(-0.036,0.11]")
+DT.freq.bin$COVERAGE = relevel(DT.freq.bin$COVERAGE, "TPL")
+
+
+# Fit GLM
+glm.freq <- glm(NCLAIMS ~ COVERAGE + FUEL + AGEPH +  POWER + BM +
+                GEO +  AGEPHPOWER, offset=log(EXP) , data = DT.freq.bin, family = poisson(link = "log"))
+## ONTBREEKT: DT.freq.bin$AGEPHPOWER 
+
+summary(glm.freq)
+anova(glm.freq)
+```
+
+
+
+# Block 5) Severity modeling 
+## Question 12 
+
+Finally, we create our own severity model. First we will try to replicate the lognormal approach as is done in the research paper. Second we will propose our own severity model using the gamma distribution.
+
+Before we calibrate the severity models we need to construct a new data set. We use the  `avg ` claim which is defined as the ratio of  `amount` and  `nclaims`. We can only take into account policyholders who actually filed a claim. Therefore, we discard all data for which the number of claims was zero. Since we do not want the very large claims to affect the tariff structure we exclude all losses above $81000$. Next, we fit the following GAM's.
+
+$$\mathbf{E}(log(\text{avg}))=\gamma_{0}+\gamma_{1}\text{coverage}_{PO}+\gamma_{2}\text{coverage}_{FO}+g_{1}(\text{ageph})+g_{2}(\text{bm})$$
+
+The first model above is the same model as in the research paper. In this model we assume a Gaussian distribution for the log(avg). The following model is our new proposed model (see Appendix) which assumes a Gamma distribution for `avg`.
+
+$$\mathbf{E}(\text{avg})=\gamma_{0}+\gamma_{1}\text{coverage}_{PO}+\gamma_{2}\text{coverage}_{FO}+g_{1}(\text{ageph})+g_{2}(\text{bm})$$
+
+Notice that we take the same reference levels as the research paper did for the lognormal severity model. After fitting the GAM's we transformed them to GLM's by binning the variables `age` and `bm` using evolutionary trees as explained in the frequency case. The only difference is that we set the tuning parameter $\alpha$ equal to 150. Here we see large difference. While the lognormal uses five bins to classify `age`, the gamma model only uses three bins. The same is true for `BM` where the lognormal uses five bins, while the gamma only uses three. This huge difference might by because we held the tuning parameter $\alpha$ equal at 150 for the callibration of the bins for the gamma model. We did not, as in the paper, optimized the tuning parameter. Next, we create the GLM's from the binned data. The reference levels we introduced for the gamma model are TPL, $[31,72)$ and $[0-1]$ for `coverage`, `age` and `BM` respectively.
+
+```{r, include =FALSE }
+DT.sev <- DT
+
+# Exclude policyholders with no claims
+DT.sev <- subset(DT.sev, DT.sev$AMOUNT>0)
+
+# Exclude large claims
+DT.sev <- as.data.frame(DT.sev[!(DT.sev$AMOUNT>81000),])
+```
+
+```{r, include =FALSE }
+gam.sev.lognormal = gam(log(AVG) ~ COVERAGE + s(AGEPH) + s(BM), data=DT.sev, family=gaussian)
+```
+
+```{r, include =FALSE }
+# GAM model
+
+summary(gam.sev.lognormal)
+```
+
+```{r, include =FALSE }
+gam.sev.gamma = gam(AVG ~ COVERAGE + s(AGEPH) + s(BM), data=DT.sev, family=Gamma)
+```
+
+```{r, include =FALSE }
+# GAM model
+summary(gam.sev.gamma )
+```
+
+```{r, include =FALSE }
+#LOGNORMAL
+
+GAM.log.sev.AGEPH <- getGAMdata_single(GAMmodel=gam.sev.lognormal,newdata=DT.sev,term="s(AGEPH)",var=DT.sev$AGEPH,varname="ageph")
+GAM.log.sev.BM = getGAMdata_single(gam.sev.lognormal,newdata=DT.sev,"s(BM)",DT.sev$BM,"bm")
+```
+
+ 
+```{r, include =FALSE }
+source("evtree.R")
+
+# Set the control parameters
+ctrl.sev = evtree.control(minbucket=0.05*nrow(DT.sev),alpha=150,maxdepth=5)
+
+# Fit the trees
+evtree.log.sev.AGEPH <- evtree(s ~ ageph,data = GAM.log.sev.AGEPH,weights=exp,control=ctrl.sev)
+evtree.log.sev.AGEPH # check with the paper!
+evtree.log.sev.BM <- evtree(s ~ bm,data = GAM.log.sev.BM,weights=exp,control=ctrl.sev)
+evtree.log.sev.BM
+```
+
+```{r, include =FALSE }
+# we have to adjust function again and add newdata argument
+
+splits.log.sev.AGEPH = splits_evtree(evtreemodel=evtree.log.sev.AGEPH,newdata=GAM.log.sev.AGEPH,GAMvar=GAM.log.sev.AGEPH$ageph,DTvar=DT.sev$AGEPH)
+splits.log.sev.AGEPH
+splits.log.sev.BM = splits_evtree(evtree.log.sev.BM,newdata=GAM.log.sev.BM,GAM.log.sev.BM$bm,DT.sev$BM)
+splits.log.sev.BM
+```
+
+```{r, include =FALSE }
+# Create binned dataset
+DT.log.sev.bin <- DT.sev[c("ID","AVG","EXP","COVERAGE")]
+#Age
+DT.log.sev.bin$AGEPH <- cut(DT.sev$AGEPH, breaks=splits.log.sev.AGEPH, 
+                      right=FALSE)
+#Bonus malu
+DT.log.sev.bin$BM <- cut(DT.sev$BM, breaks=splits.log.sev.BM, right=FALSE)
+```
+
+
+```{r, include =FALSE }
+# Choose reference levels for the GLM (most exposure)
+DT.log.sev.bin$AGEPH = relevel(DT.log.sev.bin$AGEPH, "[42,65)") # adjust labels !!!!
+DT.log.sev.bin$BM = relevel(DT.log.sev.bin$BM, "[0,1)") # adjust labels !!!!
+DT.log.sev.bin$COVERAGE = relevel(DT.log.sev.bin$COVERAGE, "TPL") 
+
+```
+
+```{r, include =FALSE }
+glm.sev.lognormal <- glm(log(AVG) ~ COVERAGE +  AGEPH  + BM , data = DT.log.sev.bin, family = gaussian)
+```
+
+```{r, include =FALSE }
+# Fit GLM
+
+summary(glm.sev.lognormal)
+anova(glm.sev.lognormal)
+```
+
+
+
+```{r, include =FALSE }
+#GAMMA
+GAM.gam.sev.AGEPH <- getGAMdata_single(GAMmodel=gam.sev.gamma,newdata=DT.sev,term="s(AGEPH)",var=DT.sev$AGEPH,varname="ageph")
+GAM.gam.sev.BM = getGAMdata_single(gam.sev.gamma,newdata=DT.sev,"s(BM)",DT.sev$BM,"bm")
+```
+ 
+```{r, include =FALSE }
+source("evtree.R")
+
+# Set the control parameters
+ctrl.sev = evtree.control(minbucket=0.05*nrow(DT.sev),alpha=150,maxdepth=5)
+
+# Fit the trees
+evtree.gam.sev.AGEPH <- evtree(s ~ ageph,data = GAM.gam.sev.AGEPH,weights=exp,control=ctrl.sev)
+evtree.gam.sev.AGEPH # check with the paper!
+evtree.gam.sev.BM <- evtree(s ~ bm,data = GAM.gam.sev.BM,weights=exp,control=ctrl.sev)
+evtree.gam.sev.BM
+```
+
+```{r, include =FALSE }
+# we have to adjust function again and add newdata argument
+
+splits.gam.sev.AGEPH = splits_evtree(evtreemodel=evtree.gam.sev.AGEPH,newdata=GAM.gam.sev.AGEPH,GAMvar=GAM.gam.sev.AGEPH$ageph,DTvar=DT.sev$AGEPH)
+splits.gam.sev.AGEPH
+splits.gam.sev.BM = splits_evtree(evtree.gam.sev.BM,newdata=GAM.gam.sev.BM,GAM.gam.sev.BM$bm,DT.sev$BM)
+splits.gam.sev.BM
+```
+
+```{r, include =FALSE }
+# Create binned dataset
+DT.gam.sev.bin <- DT.sev[c("ID","AVG","EXP","COVERAGE")]
+#Age
+DT.gam.sev.bin$AGEPH <- cut(DT.sev$AGEPH, breaks=splits.gam.sev.AGEPH, 
+                      right=FALSE)
+#Bonus malu
+DT.gam.sev.bin$BM <- cut(DT.sev$BM, breaks=splits.gam.sev.BM, right=FALSE)
+```
+
+
+
+```{r, include =FALSE }
+# Choose reference levels for the GLM (most exposure)
+DT.gam.sev.bin$AGEPH = relevel(DT.gam.sev.bin$AGEPH, "[31,72)") # adjust labels !!!!
+DT.gam.sev.bin$BM = relevel(DT.gam.sev.bin$BM, "[0,1)") # adjust labels !!!!
+DT.gam.sev.bin$COVERAGE = relevel(DT.gam.sev.bin$COVERAGE, "TPL") 
+
+```
+
+```{r, include =FALSE }
+
+glm.sev.gamma <- glm(AVG ~ COVERAGE +  AGEPH  + BM , data = DT.gam.sev.bin, family = Gamma)
+
+```
+
+```{r, include =FALSE }
+# Fit GLM
+
+summary(glm.sev.gamma)
+anova(glm.sev.gamma)
+```
+
+
+```{r, include = FALSE }
+# plots for the Log normal severity model 
+
+
+yp.sev.age <- predict(gam.sev.lognormal,type="terms",newdata =DT.sev,terms= "s(AGEPH)", se.fit=TRUE)
+yp.sev.age.bin <- predict(glm.sev.lognormal,type="terms",newdata =DT.log.sev.bin,terms= "AGEPH", se.fit=TRUE)
+
+x <- DT.sev$AGEPH
+b <- yp.sev.age$fit[,1]
+q <-yp.sev.age.bin$fit[,1]
+l <- yp.sev.age$fit[,1] - qnorm(0.975) * yp.sev.age$se.fit[,1]
+u <- yp.sev.age$fit[,1] + qnorm(0.975) * yp.sev.age$se.fit[,1]
+df <- unique(data.frame(x, b, l, u,q))
+p.sev.age <- ggplot(df, aes(x = x))
+p.sev.age <- p.sev.age + geom_line(aes(y = b), size = 1,col="#003366")
+p.sev.age <- p.sev.age + geom_point(aes(y = q), size = 1,col="#003366")
+p.sev.age<- p.sev.age + geom_line(aes(y = l), size = 0.5, linetype = 2,col="#99CCFF")
+p.sev.age <- p.sev.age + geom_line(aes(y = u), size = 0.5, linetype = 2,col="#99CCFF")
+p.sev.age <- p.sev.age + xlab("ageph") + ylab(expression(hat(g)(ageph))) + theme_bw()+ ggtitle("Smooth effect of age")
+
+
+yp.sev.bm <- predict(gam.sev.lognormal,type="terms",newdata =DT.sev,terms= "s(BM)", se.fit=TRUE)
+yp.sev.bm.bin <- predict(glm.sev.lognormal,type="terms",newdata =data.frame(BM =c("[0,1)","[1,2)",rep("[2,8)",6),rep("[8,10)",2),rep("[10,22)",13)), COVERAGE ="TPL",AGEPH="[42,65)"),terms= "BM", se.fit=TRUE)
+
+x <- DT.sev$BM
+b <- yp.sev.bm$fit[,1]
+l <- yp.sev.bm$fit[,1] - qnorm(0.975) * yp.sev.bm$se.fit[,1]
+u <- yp.sev.bm$fit[,1] + qnorm(0.975) * yp.sev.bm$se.fit[,1]
+q <-yp.sev.bm.bin$fit[,1]
+x2 <- c(0:22)
+df2 <- unique(data.frame(x2,q))
+df <- unique(data.frame(x, b, l, u))
+
+p.sev.bm <- ggplot()
+p.sev.bm <- p.sev.bm + geom_line(data=df,aes(x=x,y = b), size = 1,col="#003366")
+p.sev.nm <- p.sev.bm + geom_point(data=df,aes(x=x,y = q), size = 1,col="#003366")
+p.sev.bm <- p.sev.bm + geom_line(data=df,aes(x=x,y = l), size = 0.5, linetype = 2,col="#99CCFF")
+p.sev.bm <- p.sev.bm + geom_line(data=df,aes(x=x,y = u), size = 0.5, linetype = 2,col="#99CCFF")
+p.sev.bm <- p.sev.bm + xlab("BM") + ylab(expression(hat(g)(BM))) + theme_bw()+ ggtitle("Smooth effect of bonus malus")
+p.sev.bm <- p.sev.bm + geom_point(data=df2, aes(x=x2,y = q), size = 1,col="#003366")
+
+```
+
+```{r, echo= FALSE, fig.cap="Severity model with a lognormal model" }
+grid.arrange(p.sev.age,p.sev.bm,ncol=2,nrow=1)
+```
+
+```{r, include =FALSE }
+#plot the gamma
+
+yp.sev.age <- predict(gam.sev.gamma,type="terms",newdata =DT.sev,terms= "s(AGEPH)", se.fit=TRUE)
+yp.sev.age.bin <- predict(glm.sev.gamma,type="terms",newdata =DT.gam.sev.bin,terms= "AGEPH", se.fit=TRUE)
+
+x <- DT.sev$AGEPH
+b <- yp.sev.age$fit[,1]
+q <-yp.sev.age.bin$fit[,1]
+l <- yp.sev.age$fit[,1] - qnorm(0.975) * yp.sev.age$se.fit[,1]
+u <- yp.sev.age$fit[,1] + qnorm(0.975) * yp.sev.age$se.fit[,1]
+df <- unique(data.frame(x, b, l, u,q))
+p.sev.age <- ggplot(df, aes(x = x))
+p.sev.age <- p.sev.age + geom_line(aes(y = b), size = 1,col="#003366")
+p.sev.age <- p.sev.age + geom_point(aes(y = q), size = 1,col="#003366")
+p.sev.age<- p.sev.age + geom_line(aes(y = l), size = 0.5, linetype = 2,col="#99CCFF")
+p.sev.age <- p.sev.age + geom_line(aes(y = u), size = 0.5, linetype = 2,col="#99CCFF")
+p.sev.age <- p.sev.age + xlab("ageph") + ylab(expression(hat(g)(ageph))) + theme_bw()+ ggtitle("Smooth effect of age")
+
+
+yp.sev.bm <- predict(gam.sev.gamma,type="terms",newdata =DT.sev,terms= "s(BM)", se.fit=TRUE)
+yp.sev.bm.bin <- predict(glm.sev.gamma,type="terms",newdata =data.frame(BM =c("[0,1)","[1,2)",rep("[2,22)",21)), COVERAGE ="TPL",AGEPH="[31,72)"),terms= "BM", se.fit=TRUE)
+
+x <- DT.sev$BM
+b <- yp.sev.bm$fit[,1]
+l <- yp.sev.bm$fit[,1] - qnorm(0.975) * yp.sev.bm$se.fit[,1]
+u <- yp.sev.bm$fit[,1] + qnorm(0.975) * yp.sev.bm$se.fit[,1]
+q <-yp.sev.bm.bin$fit[,1]
+x2 <- c(0:22)
+df2 <- unique(data.frame(x2,q))
+df <- unique(data.frame(x, b, l, u))
+
+p.sev.bm <- ggplot()
+p.sev.bm <- p.sev.bm + geom_line(data=df,aes(x=x,y = b), size = 1,col="#003366")
+p.sev.nm <- p.sev.bm + geom_point(data=df,aes(x=x,y = q), size = 1,col="#003366")
+p.sev.bm <- p.sev.bm + geom_line(data=df,aes(x=x,y = l), size = 0.5, linetype = 2,col="#99CCFF")
+p.sev.bm <- p.sev.bm + geom_line(data=df,aes(x=x,y = u), size = 0.5, linetype = 2,col="#99CCFF")
+p.sev.bm <- p.sev.bm + xlab("BM") + ylab(expression(hat(g)(BM))) + theme_bw()+ ggtitle("Smooth effect of bonus malus")
+p.sev.bm <- p.sev.bm + geom_point(data=df2, aes(x=x2,y = q), size = 1,col="#003366")
+
+
+```
+
+We also replicate the graphs of the smooth effect for `age` and `bm`. Figure 13 illustrates the smooth effect from the Gamma model, we see a completely different picture compared to the lognormal model. 
+
+```{r , echo=FALSE,fig.cap="Severity model with a Gamma model" }
+grid.arrange(p.sev.age,p.sev.bm,ncol=2,nrow=1)
+```
+
+Finally, we calculate the AIC and BIC of both lognormal and gamma model. We observe that the lognormal provides a better fit as a GLM as well as a GAM. In conclusion, modeling the severity by a lognormal distribution gives the best fit.
+
+```{r , include=FALSE }
+# calculate AIC and BIC for both the GLM and GAM for both the lognormal and gamma 
+
+LL.gam.gamma<-logLik.gam(gam.sev.gamma)
+LL.glm.gamma<-logLik(glm.sev.gamma)
+LL.gam.lognormal<-logLik.gam(gam.sev.lognormal)
+LL.glm.lognormal<-logLik(glm.sev.lognormal)
+
+AIC.gam.gamma <- 20 - 2*LL.gam.gamma
+AIC.glm.gamma <- 20 - 2*LL.glm.gamma
+AIC.gam.lognormal <- 20 - 2*LL.gam.lognormal
+AIC.glm.lognormal <- 20 - 2*LL.glm.lognormal
+
+BIC.gam.gamma <- 2*log(length(DT.sev$ID)) - 2*LL.gam.gamma
+BIC.glm.gamma <- 2*log(length(DT.sev$ID)) - 2*LL.glm.gamma
+BIC.gam.lognormal <- 2*log(length(DT.sev$ID)) - 2*LL.gam.lognormal
+BIC.glm.lognormal <- 2*log(length(DT.sev$ID)) - 2*LL.glm.lognormal
+
+summary<- matrix(c(AIC.gam.lognormal,AIC.glm.lognormal,AIC.gam.gamma,AIC.glm.gamma,BIC.gam.lognormal,BIC.glm.lognormal,BIC.gam.gamma,BIC.glm.gamma), ncol = 4, byrow = TRUE)
+colnames(summary) <- c("Lognormal~GAM~","Lognormal~GLM~","Gamma~GAM~","Gamma~GLM~")
+rownames(summary)<- c("AIC","BIC")
+```
+
+```{r echo=FALSE }
+kable(summary,caption = "AIC and BIC for the severity models", align='c',format="latex", booktabs = TRUE)%>%kable_styling(latex_options = c("hold_position"))
+```
+
+\newpage
+
+# References
+
+Henckaerts, Roel and Antonio, Katrien and Clijsters, Maxime and Roel, Verbelen, A Data Driven Binning Strategy for the Construction of Insurance Tariff Classes (May 12, 2017). Available at SSRN: https://ssrn.com/abstract=3052174
+
+# Appendix
+
+```{r echo= FALSE }
+summary <- xtable(glm.freq)
+
+kable(summary,caption = "Frequency model", align='c',format="latex", booktabs = TRUE) %>%
+          kable_styling(latex_options = c("striped","hold_position"))
+```
+
+```{r echo= FALSE }
+
+summary <- xtable(glm.sev.gamma)
+
+kable(summary,caption = "Severity model", align='c',format="latex", booktabs = TRUE) %>%
+          kable_styling(latex_options = c("striped","hold_position"))
+```
+
